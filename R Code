@@ -1,0 +1,261 @@
+#libraries
+library(tidycensus)
+library(leaflet)
+library(tidyverse)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(maps)
+library(lubridate)
+library(usmap)
+library(sf)
+library(zoo)
+
+#load data, per professor instructions
+
+wapo.data <- read.csv("data")
+wapo.data$date <- as.Date(wapo.data$date)
+wapo.data$month <- substr(wapo.data$date, 6, 7)
+wapo.data$year <- substr(wapo.data$date,0,4)
+wapo.data$yearmonth <- paste(wapo.data$year, wapo.data$month, sep = "-")
+wapo.data$race <- gsub("W;B;N", "O", wapo.data$race)
+wapo.data$race <- gsub("N;H", "O", wapo.data$race)
+wapo.data$race <- gsub("W;H", "O", wapo.data$race)
+wapo.data$race <- gsub("B;H", "O", wapo.data$race)
+wapo.data$race <- gsub("W;B", "O", wapo.data$race)
+
+#subset data
+
+wapo.yearmonth <- wapo.data %>% #shootings per yearmonth (event counts over time)
+  group_by(yearmonth) %>% 
+  summarise(count = n()) %>% 
+  mutate(pct = round(count/sum(count)*100, 2))
+wapo.yearmonth$yearmonth<-as.yearmon(wapo.yearmonth$yearmonth, format = "%Y-%m")
+
+wapo.state <- wapo.data %>% #shootings per state (place)
+  group_by(state) %>% 
+  summarise(count = n()) %>% 
+  mutate(pct = round(count/sum(count)*100, 2))
+
+wapo.race <- wapo.data %>% #shootings per race (victim characteristics)
+  group_by(race) %>% 
+  summarise(count = n()) %>% 
+  mutate(pct = round(count/sum(count)*100, 2))
+
+wapo.camera <- wapo.data %>% #shootings per camera (victim characteristics)
+  group_by(body_camera) %>% 
+  summarise(count = n()) %>% 
+  mutate(pct = round(count/sum(count)*100, 2))
+
+wapo.race.camera <- wapo.data %>% #events per race and camera (across count, victim)
+  group_by(race, body_camera) %>% 
+  summarise(count = n()) %>% 
+  mutate(pct = count/sum(count)*100)
+
+census.variables.2022 <- load_variables(2022, "acs5", cache = TRUE)
+race.2022.US <- get_acs(geography = "us", variables = c("B02008_001", 
+                                                      "B02009_001", 
+                                                      "B02010_001", 
+                                                      "B02011_001", 
+                                                      "B03001_003"), year = 2022)
+race.2022.US$variable <- gsub("B02008_001", "White", race.2022.US$variable)
+race.2022.US$variable <- gsub("B02009_001", "Black", race.2022.US$variable)
+race.2022.US$variable <- gsub("B02010_001", "Native American", race.2022.US$variable)
+race.2022.US$variable <- gsub("B02011_001", "Asian", race.2022.US$variable)
+race.2022.US$variable <- gsub("B03001_003", "Hispanic", race.2022.US$variable)
+
+race.2022.state <- get_acs(geography = "state", 
+                     variables = c("B02008_001", "B02009_001", 
+                                   "B02010_001", "B02011_001", 
+                                   "B03001_003"), year = 2022)
+race.2022.state$variable <- gsub("B02008_001", "White", race.2022.state$variable)
+race.2022.state$variable <- gsub("B02009_001", "Black", race.2022.state$variable)
+race.2022.state$variable <- gsub("B02010_001", "Native American", race.2022.state$variable)
+race.2022.state$variable <- gsub("B02011_001", "Asian", race.2022.state$variable)
+race.2022.state$variable <- gsub("B03001_003", "Hispanic", race.2022.state$variable)
+
+totalpop.2022 <- get_acs(geography = "state", 
+                         variables = "B01003_001", year = 2022)
+names(totalpop.2022) <- c("GEOID", "State", "Variable", "Population", "junk")
+totalpop.2022$State.PCT <- round(totalpop.2022$Population/sum(totalpop.2022$Population)*100, 2)
+
+temp.race.population <- race.2022.state %>% 
+  left_join(totalpop.2022, by = "GEOID")
+race.population <- temp.race.population[c(1:4,8,10)]
+names(race.population) <- c("GEOID", "State", "Race", 
+                            "Population.Race", "Population.State", 
+                            "State.PCT")
+race.population$Race.PCT <- round(race.population$Population.Race/race.population$Population.State*100, 2)
+
+race.2022.US$PCT <- race.2022.US$estimate/sum(totalpop.2022$Population)*100
+names(race.2022.US) <- c("GEOID", "Area", "Race", "Count", "moe", "Race.PCT")
+
+wapo.race$race <- gsub("W", "White", wapo.race$race)
+wapo.race$race <- gsub("A", "Asian", wapo.race$race)
+wapo.race$race <- gsub("B", "Black", wapo.race$race)
+wapo.race$race <- gsub("H", "Hispanic", wapo.race$race)
+wapo.race$race <- gsub("N", "Native American", wapo.race$race)
+
+names(wapo.race) <- c("Race", "Count", "Shooting.PCT")
+
+wapo.state$State.Name <- state.name[match(wapo.state$state,state.abb)]
+wapo.state$State.Name <- replace_na(wapo.state$State.Name, "District of Columbia")
+names(wapo.state) <- c("oldstate", "Count", "Shooting.PCT", "State")
+
+wapo.census.race <- wapo.race %>% left_join(race.2022.US, by = "Race")
+wapo.census.state <- wapo.state %>% left_join(totalpop.2022, by = "State")
+wapo.census.state$Difference<-(wapo.census.state$Shooting.PCT-wapo.census.state$State.PCT)
+
+## event count: line chart and linear regression
+ggplot(wapo.yearmonth, aes(x = yearmonth, y = count)) +
+  geom_line() +
+  theme_classic() +
+  geom_smooth(method = "lm", se=FALSE, color="darkblue") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(y = "Event Count", x = "Date", title = "Event Counts over Time")
+
+summary(lm(count~yearmonth, data = wapo.yearmonth))
+
+## victims: bar chart and outlier tests
+#bar chart
+ggplot(wapo.race.camera, aes(x = factor(race), y = pct, fill = factor(body_camera))) + 
+  geom_bar(stat="identity", width = 0.7) + 
+  labs(x = "Race", y = "Percent", fill = "Body Camera", 
+       title = "Percent of Police Shootings with a Body Camera by Race") +
+  theme_classic()
+
+#outliers - race/camera
+diff<-wapo.race.camera %>%
+  group_by(race) %>%
+  mutate(difference = pct - lag(pct))
+diff[is.na(diff)]<-0
+diff<-diff %>%
+  group_by(race) %>%
+  summarise(difference = sum(difference))
+
+IQR1<-(-57.53 + 67.24)
+lowerfence1<-(-67.24-(1.5*(IQR1)))
+upperfence1<-(-57.53+(1.5*IQR1))
+
+test_sig1 <- c()
+for (d in diff$difference){
+  if ((d > upperfence1) | (d < lowerfence1)) {
+    value <- 'y'
+    test_sig1 <- c(test_sig1,value)
+  }
+  else {
+    value <- 'n'
+    test_sig1 <- c(test_sig1,value)
+  }
+}
+
+diff$IsOutlier <- test_sig1
+diff[,c(1:3)]
+
+#proportion test - camera
+bodycam<-prop.test(7905, 9497)
+bodycam
+
+#outliers - race
+census.race.less<-wapo.census.race[-1,]
+census.race.less<-census.race.less[-5,]
+census.race.less$DIFF<-(census.race.less$Shooting.PCT-census.race.less$Race.PCT)
+
+IQR2<-(-0.6784 + 5.2276)
+lowerfence2<-(-5.2276-(1.5*(IQR2)))
+upperfence2<-(-0.6784+(1.5*IQR2))
+
+test_sig2 <- c()
+for (di in census.race.less$DIFF){
+  if ((di > upperfence2) | (di < lowerfence2)) {
+    value <- 'y'
+    test_sig2 <- c(test_sig2,value)
+  }
+  else {
+    value <- 'n'
+    test_sig2 <- c(test_sig2,value)
+  }
+}
+
+census.race.less$IsOutlier <- test_sig2
+census.race.less[,c(1,3,8,9,10)]
+
+# contour map
+wapo.data.clean <- subset(wapo.data, !is.na(wapo.data$latitude))
+wapo.data.clean$latitude <- round(as.numeric(wapo.data.clean$latitude),4)
+wapo.data.clean$longitude <- round(as.numeric(wapo.data.clean$longitude),4)
+wapo.data.clean <- subset(wapo.data.clean, wapo.data.clean$longitude > -160)
+world <- ne_countries(scale = "medium", returnclass = "sf") # this builds a list of countries
+states <- st_as_sf(map("state", plot = FALSE, fill = TRUE)) # this cleans up the US states
+
+ggplot(data = world) + 
+  geom_sf() + 
+  geom_sf(data = states, fill = NA) + 
+  geom_density_2d(data = wapo.data.clean, aes(x = longitude, y = latitude), 
+                  color = "darkblue", bins = 7) + 
+  coord_sf(xlim = c(-135, -60), ylim = c(25, 50), expand = FALSE) +
+  theme_void() +
+  labs(title = "Contour Map of Police Shootings in the U.S.") +
+  facet_wrap(~year, nrow=4)
+
+#boxplot
+ggplot(data = wapo.census.state, aes(x = Difference)) +
+  geom_boxplot() +
+  labs(title = 'Boxplot of Difference Between Percentage of Shootings and Population By State') +
+  theme_classic()
+
+# outliers test - states
+IQR<-(0.44500 + 0.23500)
+lowerfence<-(-0.23500-(1.5*(IQR)))
+upperfence<-(0.44500+(1.5*IQR))
+
+test_sig <- c()
+for (diff in wapo.census.state$Difference){
+  if ((diff > upperfence) | (diff < lowerfence)) {
+    value <- 'y'
+    test_sig <- c(test_sig,value)
+  }
+  else {
+    value <- 'n'
+    test_sig <- c(test_sig,value)
+  }
+}
+
+wapo.census.state$IsOutlier <- test_sig
+print(wapo.census.state[,c(3,4,9,10,11)], n = 51)
+
+#subset summary table
+wapo.state.yearmon <- wapo.data %>% #shootings per some states (across)
+  group_by(state, yearmonth) %>% 
+  summarise(count = n()) %>% 
+  mutate(pct = round(count/sum(count)*100, 2))
+wapo.state.yearmon$yearmonth<-as.yearmon(wapo.state.yearmon$yearmonth, format = "%Y-%m")
+wapo.state.year <- wapo.state.yearmon %>%
+  filter(state == c("AZ","CA","CO"))
+
+#line chart
+ggplot(wapo.state.year, aes(x = yearmonth, y = count, color = state)) +
+  geom_line() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  geom_smooth(method = "lm", se=FALSE)
+  labs(y = "Event Count", x = "Date", title = "Event Counts over Time per State")
+
+#summary tables
+wapo.state.AZ <- wapo.state.yearmon %>%
+  filter(state == "AZ")
+
+wapo.state.CA <- wapo.state.yearmon %>%
+  filter(state == "CA")
+
+wapo.state.CO <- wapo.state.yearmon %>%
+  filter(state == "CO")
+
+#linear regression
+AZ<-lm(count~yearmonth, data = wapo.state.AZ)
+summary(AZ)
+
+CA<-lm(count~yearmonth, data = wapo.state.CA)
+summary(CA)
+
+CO<-lm(count~yearmonth, data = wapo.state.CO)
+summary(CO)
